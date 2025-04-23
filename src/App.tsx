@@ -79,18 +79,23 @@ function App() {
   }, [user]);
   
   const getCurrentFiles = useCallback(() => {
-    return files.filter(file => {
-      // For root directory
-      if (currentPath === '/') {
-        return !file.parent;
-      }
-      
-      // For other directories
-      return file.parent === files.find(f => 
-        f.type === 'folder' && f.path === currentPath
-      )?.id;
-    });
-  }, [files, currentPath]);
+    // For root directory
+    if (currentPath === '/') {
+      return !searchQuery ? files.filter(file => !file.parent) : files;
+    }
+    
+    // For other directories, if not searching
+    if (!searchQuery) {
+      return files.filter(file => 
+        file.parent === files.find(f => 
+          f.type === 'folder' && f.path === currentPath
+        )?.id
+      );
+    }
+    
+    // When searching, return all files that match the search
+    return files;
+  }, [files, currentPath, searchQuery]);
   
   useEffect(() => {
     setBreadcrumbs(generateBreadcrumbs(currentPath));
@@ -116,6 +121,7 @@ function App() {
   const handleItemClick = async (item: FileItem) => {
     if (item.type === 'folder') {
       setCurrentPath(item.path);
+      setSearchQuery(''); // Clear search when navigating
     } else {
       const { data } = await supabase.storage
         .from('files')
@@ -129,6 +135,7 @@ function App() {
   
   const handleBreadcrumbClick = (path: string) => {
     setCurrentPath(path);
+    setSearchQuery(''); // Clear search when navigating
   };
   
   const handleFileUpload = async (fileList: FileList) => {

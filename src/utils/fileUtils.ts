@@ -118,7 +118,7 @@ const uploadFile = async (
     .insert({
       id: fileId,
       name: fileName,
-      path: path + fileName,
+      path: storagePath,
       size: file.size,
       type: file.type,
       url: uploadData?.path || '',
@@ -139,7 +139,7 @@ const uploadFile = async (
       name: fileName,
       type: 'file',
       size: file.size,
-      path: path + fileName,
+      path: storagePath,
       parent: parentId,
     });
   }

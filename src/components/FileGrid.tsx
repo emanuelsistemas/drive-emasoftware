@@ -18,21 +18,20 @@ const FileGrid: React.FC<FileGridProps> = ({ files, onItemClick, onFileUpdate })
   const [isDownloading, setIsDownloading] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [itemToDelete, setItemToDelete] = useState<FileItem | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const getAllFilesInFolder = (folderId: string): FileItem[] => {
     const result: FileItem[] = [];
     
-    // Get immediate files in this folder
-    const directFiles = files.filter(file => file.parent === folderId);
-    result.push(...directFiles);
+    // Get immediate files and folders
+    const directItems = files.filter(item => item.parent === folderId);
     
-    // Get subfolders and their files
-    const subfolders = files.filter(item => 
-      item.type === 'folder' && item.parent === folderId
-    );
-    
-    for (const subfolder of subfolders) {
-      result.push(...getAllFilesInFolder(subfolder.id));
+    // Recursively get items from subfolders
+    for (const item of directItems) {
+      result.push(item);
+      if (item.type === 'folder') {
+        result.push(...getAllFilesInFolder(item.id));
+      }
     }
     
     return result;
@@ -44,9 +43,12 @@ const FileGrid: React.FC<FileGridProps> = ({ files, onItemClick, onFileUpdate })
     
     try {
       if (item.type === 'file') {
+        // Remove any leading slash from the path to prevent double slashes
+        const storagePath = item.path.replace(/^\/+/, '');
+        
         const { data } = await supabase.storage
           .from('files')
-          .createSignedUrl(item.path, 3600);
+          .createSignedUrl(storagePath, 3600);
 
         if (data?.signedUrl) {
           const link = document.createElement('a');
@@ -57,29 +59,28 @@ const FileGrid: React.FC<FileGridProps> = ({ files, onItemClick, onFileUpdate })
           document.body.removeChild(link);
         }
       } else {
-        // Handle folder download
         const zip = new JSZip();
         const folderFiles = getAllFilesInFolder(item.id);
         
-        // Create signed URLs for all files
-        const downloadPromises = folderFiles.map(async (file) => {
-          if (file.type === 'file') {
+        const downloadPromises = folderFiles
+          .filter(file => file.type === 'file')
+          .map(async (file) => {
+            // Remove any leading slash from each file path
+            const storagePath = file.path.replace(/^\/+/, '');
+            
             const { data } = await supabase.storage
               .from('files')
-              .createSignedUrl(file.path, 3600);
+              .createSignedUrl(storagePath, 3600);
             
             if (data?.signedUrl) {
               const response = await fetch(data.signedUrl);
               const blob = await response.blob();
-              const relativePath = file.path.startsWith('/') ? file.path.slice(1) : file.path;
-              zip.file(relativePath, blob);
+              zip.file(file.name, blob);
             }
-          }
-        });
+          });
         
         await Promise.all(downloadPromises);
         
-        // Generate and download zip
         const content = await zip.generateAsync({ type: 'blob' });
         const url = window.URL.createObjectURL(content);
         const link = document.createElement('a');
@@ -103,60 +104,105 @@ const FileGrid: React.FC<FileGridProps> = ({ files, onItemClick, onFileUpdate })
     setDeleteConfirmOpen(true);
   };
 
-  const handleDelete = async () => {
-    if (!itemToDelete) return;
+  const deleteFolderRecursively = async (folderId: string) => {
+    try {
+      const allItems = getAllFilesInFolder(folderId);
+      
+      // Group items by type and depth
+      const fileItems = allItems.filter(item => item.type === 'file');
+      const folderItems = allItems
+        .filter(item => item.type === 'folder')
+        .sort((a, b) => {
+          // Sort by path depth (descending) to delete deepest folders first
+          const depthA = (a.path.match(/\//g) || []).length;
+          const depthB = (b.path.match(/\//g) || []).length;
+          return depthB - depthA;
+        });
 
+      // Delete all files first from storage
+      if (fileItems.length > 0) {
+        const { error: storageError } = await supabase.storage
+          .from('files')
+          .remove(fileItems.map(file => file.path));
+
+        if (storageError) {
+          throw new Error(`Error deleting files from storage: ${storageError.message}`);
+        }
+
+        // Delete files from database after successful storage deletion
+        const { error: dbError } = await supabase
+          .from('files')
+          .delete()
+          .in('id', fileItems.map(file => file.id));
+
+        if (dbError) {
+          throw new Error(`Error deleting files from database: ${dbError.message}`);
+        }
+      }
+
+      // Delete folders from deepest to shallowest
+      for (const folder of folderItems) {
+        const { error: folderError } = await supabase
+          .from('folders')
+          .delete()
+          .eq('id', folder.id);
+
+        if (folderError) {
+          throw new Error(`Error deleting folder: ${folderError.message}`);
+        }
+      }
+
+      // Finally delete the target folder
+      const { error: targetFolderError } = await supabase
+        .from('folders')
+        .delete()
+        .eq('id', folderId);
+
+      if (targetFolderError) {
+        throw new Error(`Error deleting target folder: ${targetFolderError.message}`);
+      }
+
+    } catch (error) {
+      console.error('Error in recursive deletion:', error);
+      throw error;
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!itemToDelete || isDeleting) return;
+
+    setIsDeleting(true);
     try {
       if (itemToDelete.type === 'file') {
-        // Delete from storage
-        await supabase.storage
+        // Delete from storage first
+        const { error: storageError } = await supabase.storage
           .from('files')
           .remove([itemToDelete.path]);
 
-        // Delete from database
-        await supabase
-          .from('files')
-          .delete()
-          .eq('id', itemToDelete.id);
-      } else {
-        // Delete folder and all its contents
-        const folderFiles = getAllFilesInFolder(itemToDelete.id);
-        
-        // Delete all files from storage
-        const filePaths = folderFiles
-          .filter(file => file.type === 'file')
-          .map(file => file.path);
-        
-        if (filePaths.length > 0) {
-          await supabase.storage
-            .from('files')
-            .remove(filePaths);
+        if (storageError) {
+          throw new Error(`Error deleting file from storage: ${storageError.message}`);
         }
 
-        // Delete all files from database
-        await supabase
+        // Delete from database after successful storage deletion
+        const { error: dbError } = await supabase
           .from('files')
           .delete()
-          .in('id', folderFiles.filter(f => f.type === 'file').map(f => f.id));
-
-        // Delete all subfolders
-        await supabase
-          .from('folders')
-          .delete()
-          .in('id', folderFiles.filter(f => f.type === 'folder').map(f => f.id));
-
-        // Delete the main folder
-        await supabase
-          .from('folders')
-          .delete()
           .eq('id', itemToDelete.id);
+
+        if (dbError) {
+          throw new Error(`Error deleting file from database: ${dbError.message}`);
+        }
+      } else {
+        await deleteFolderRecursively(itemToDelete.id);
       }
+      
       onFileUpdate();
+      setDeleteConfirmOpen(false);
+      setItemToDelete(null);
     } catch (error) {
       console.error('Error deleting item:', error);
     } finally {
-      setDeleteConfirmOpen(false);
-      setItemToDelete(null);
+      setIsDeleting(false);
     }
   };
 
@@ -167,7 +213,6 @@ const FileGrid: React.FC<FileGridProps> = ({ files, onItemClick, onFileUpdate })
     if (item.type === 'file') {
       const lastDotIndex = item.name.lastIndexOf('.');
       if (lastDotIndex > 0) {
-        // Set only the name part without extension
         setNewName(item.name.substring(0, lastDotIndex));
       } else {
         setNewName(item.name);
@@ -184,7 +229,6 @@ const FileGrid: React.FC<FileGridProps> = ({ files, onItemClick, onFileUpdate })
     if (item.type === 'file') {
       const lastDotIndex = item.name.lastIndexOf('.');
       if (lastDotIndex > 0) {
-        // Preserve the original extension
         const extension = item.name.substring(lastDotIndex);
         finalName = newName + extension;
       }
@@ -392,14 +436,16 @@ const FileGrid: React.FC<FileGridProps> = ({ files, onItemClick, onFileUpdate })
                   <button
                     onClick={() => setDeleteConfirmOpen(false)}
                     className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-md text-gray-200 transition-colors"
+                    disabled={isDeleting}
                   >
                     Cancelar
                   </button>
                   <button
                     onClick={handleDelete}
-                    className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded-md text-white transition-colors"
+                    disabled={isDeleting}
+                    className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded-md text-white transition-colors disabled:opacity-50"
                   >
-                    Excluir
+                    {isDeleting ? 'Excluindo...' : 'Excluir'}
                   </button>
                 </div>
               </div>
