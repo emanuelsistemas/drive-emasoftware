@@ -179,7 +179,8 @@ function App() {
         
         <FileGrid 
           files={filteredFiles} 
-          onItemClick={handleItemClick} 
+          onItemClick={handleItemClick}
+          onFileUpdate={loadFiles}
         />
       </main>
     </div>
