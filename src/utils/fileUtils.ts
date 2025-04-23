@@ -7,29 +7,43 @@ export const processFiles = async (fileList: FileList | null, currentPath: strin
 
   const items: FileItem[] = [];
   const processPromises: Promise<void>[] = [];
+  const folderCache = new Map<string, string>();
 
   for (const file of Array.from(fileList)) {
     const relativePath = file.webkitRelativePath || file.name;
-    const pathParts = relativePath.split('/');
+    const pathParts = relativePath.split('/').filter(Boolean);
     const fileName = pathParts.pop() || file.name;
 
     if (pathParts.length > 0) {
       let currentParent = null;
       let currentPathBuilt = currentPath;
 
+      // Process each folder in the path
       for (const folder of pathParts) {
         currentPathBuilt += folder + '/';
         
+        // Check if we've already processed this folder path
+        const cachedFolderId = folderCache.get(currentPathBuilt);
+        if (cachedFolderId) {
+          currentParent = cachedFolderId;
+          continue;
+        }
+
+        // Check if folder exists in database
         const { data: existingFolders } = await supabase
           .from('folders')
-          .select('id')
+          .select('id, parent_id')
           .eq('name', folder)
           .eq('path', currentPathBuilt)
           .limit(1);
 
         const existingFolder = existingFolders && existingFolders.length > 0 ? existingFolders[0] : null;
 
-        if (!existingFolder) {
+        if (existingFolder) {
+          currentParent = existingFolder.id;
+          folderCache.set(currentPathBuilt, existingFolder.id);
+        } else {
+          // Create new folder
           const folderId = uuidv4();
           const { data: newFolder } = await supabase
             .from('folders')
@@ -52,14 +66,15 @@ export const processFiles = async (fileList: FileList | null, currentPath: strin
               parent: currentParent,
             });
             currentParent = newFolder.id;
+            folderCache.set(currentPathBuilt, newFolder.id);
           }
-        } else {
-          currentParent = existingFolder.id;
         }
       }
 
+      // Process the file within its folder
       processPromises.push(uploadFile(file, fileName, currentPathBuilt, currentParent, items));
     } else {
+      // Process root-level file
       processPromises.push(uploadFile(file, fileName, currentPath, null, items));
     }
   }
