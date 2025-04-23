@@ -5,12 +5,15 @@ import Breadcrumb from './components/Breadcrumb';
 import FileGrid from './components/FileGrid';
 import ActionBar from './components/ActionBar';
 import Auth from './components/Auth';
+import CreateFolderModal from './components/CreateFolderModal'; // Importar o modal
 import { supabase } from './lib/supabase';
 import { User } from '@supabase/supabase-js';
+import { v4 as uuidv4 } from 'uuid'; // Importar uuid
 
 function App() {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [currentPath, setCurrentPath] = useState('/');
+  const [isCreateFolderModalOpen, setIsCreateFolderModalOpen] = useState(false); // Estado do modal
   const [searchQuery, setSearchQuery] = useState('');
   const [filteredFiles, setFilteredFiles] = useState<FileItem[]>([]);
   const [breadcrumbs, setBreadcrumbs] = useState(generateBreadcrumbs('/'));
@@ -152,6 +155,71 @@ function App() {
     setSearchQuery(query);
   };
 
+  const handleOpenCreateFolderModal = () => {
+    setIsCreateFolderModalOpen(true);
+  };
+
+  const handleCreateFolder = async (folderName: string) => {
+    if (!user) throw new Error('Usuário não autenticado');
+
+    // Determinar o ID da pasta pai buscando diretamente no banco
+    let parentFolderId: string | null = null;
+    if (currentPath !== '/') {
+      const { data: parentFolderData, error: parentError } = await supabase
+        .from('folders')
+        .select('id')
+        .eq('path', currentPath)
+        .eq('user_id', user.id)
+        .single(); // Espera encontrar exatamente uma pasta
+
+      if (parentError || !parentFolderData) {
+        console.error(`Erro ao buscar pasta pai para o caminho: ${currentPath}`, parentError);
+        throw new Error(`Pasta pai não encontrada ou erro ao buscar: ${currentPath}`);
+      }
+      parentFolderId = parentFolderData.id;
+    }
+
+    // Construir o caminho completo da nova pasta
+    const newFolderPath = `${currentPath}${folderName}/`;
+
+    // Verificar se já existe uma pasta com o mesmo nome no mesmo local
+    const { data: existingFolder, error: checkError } = await supabase
+      .from('folders')
+      .select('id')
+      .eq('name', folderName)
+      .eq('path', newFolderPath) // Verificar o caminho exato
+      .eq('user_id', user.id)
+      .maybeSingle(); // Usar maybeSingle para não dar erro se não encontrar
+
+    if (checkError) {
+      console.error('Erro ao verificar pasta existente:', checkError);
+      throw checkError;
+    }
+
+    if (existingFolder) {
+      throw new Error(`Uma pasta com o nome "${folderName}" já existe neste local.`);
+    }
+
+    // Inserir a nova pasta no banco de dados
+    const { error: insertError } = await supabase
+      .from('folders')
+      .insert({
+        id: uuidv4(), // Gerar um novo ID
+        name: folderName,
+        path: newFolderPath,
+        parent_id: parentFolderId,
+        user_id: user.id,
+      });
+
+    if (insertError) {
+      console.error('Erro ao criar pasta no banco:', insertError);
+      throw insertError;
+    }
+
+    // Recarregar a lista de arquivos/pastas
+    await loadFiles();
+  };
+
   if (!user) {
     return <Auth />;
   }
@@ -175,6 +243,7 @@ function App() {
           onSearch={handleSearch}
           onFileUpload={handleFileUpload}
           onFolderUpload={handleFolderUpload}
+          onCreateFolder={handleOpenCreateFolderModal} // Passar a função
         />
         
         <div className="border-b border-gray-800 pb-2">
@@ -190,6 +259,14 @@ function App() {
           onFileUpdate={loadFiles}
         />
       </main>
+
+      {/* Renderizar o modal */}
+      <CreateFolderModal
+        isOpen={isCreateFolderModalOpen}
+        onClose={() => setIsCreateFolderModalOpen(false)}
+        onCreate={handleCreateFolder}
+        currentPath={currentPath}
+      />
     </div>
   );
 }

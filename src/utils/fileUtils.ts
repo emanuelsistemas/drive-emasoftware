@@ -45,7 +45,8 @@ export const processFiles = async (fileList: FileList | null, currentPath: strin
         } else {
           // Create new folder
           const folderId = uuidv4();
-          const { data: newFolder } = await supabase
+          // Definir tipo explícito para newFolder
+          const { data: newFolder }: { data: any | null } = await supabase 
             .from('folders')
             .insert({
               id: folderId,
@@ -72,10 +73,31 @@ export const processFiles = async (fileList: FileList | null, currentPath: strin
       }
 
       // Process the file within its folder
+      // Process the file within its folder
       processPromises.push(uploadFile(file, fileName, currentPathBuilt, currentParent, items));
     } else {
-      // Process root-level file
-      processPromises.push(uploadFile(file, fileName, currentPath, null, items));
+      // Process single file upload (not part of a folder structure)
+      // We need to find the parent folder ID based on the currentPath
+      let parentFolderId: string | null = null;
+      if (currentPath !== '/') {
+        // Find the folder ID from the database based on the current path
+        const { data: parentFolderData, error: parentError } = await supabase
+          .from('folders')
+          .select('id')
+          .eq('path', currentPath)
+          .eq('user_id', (await supabase.auth.getUser()).data.user?.id)
+          .single();
+
+        if (parentError || !parentFolderData) {
+          console.error(`Error finding parent folder for path ${currentPath}:`, parentError);
+          // Handle error appropriately, maybe skip the file or throw an error
+          // For now, we'll proceed with null parentId, which means root
+        } else {
+          parentFolderId = parentFolderData.id;
+        }
+      }
+      // Pass the correct parentFolderId (or null for root)
+      processPromises.push(uploadFile(file, fileName, currentPath, parentFolderId, items));
     }
   }
 
@@ -97,7 +119,9 @@ const uploadFile = async (
     throw new Error('User not authenticated');
   }
 
-  const storagePath = `${userId}/${path}${fileName}`;
+  // Ensure path ends with a slash if it's not root
+  const normalizedPath = path === '/' ? path : (path.endsWith('/') ? path : path + '/');
+  const storagePath = `${userId}/${normalizedPath}${fileName}`;
   
   // Upload do arquivo para o Storage
   const { data: uploadData, error: uploadError } = await supabase.storage
