@@ -1,9 +1,9 @@
-import React, { useRef } from 'react';
-import { Upload, FolderUp } from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import { Upload, FolderUp, Loader2 } from 'lucide-react';
 
 interface FileUploaderProps {
-  onFileUpload: (fileList: FileList) => void;
-  onFolderUpload: (fileList: FileList) => void;
+  onFileUpload: (fileList: FileList) => Promise<void>;
+  onFolderUpload: (fileList: FileList) => Promise<void>;
 }
 
 const FileUploader: React.FC<FileUploaderProps> = ({ 
@@ -12,6 +12,7 @@ const FileUploader: React.FC<FileUploaderProps> = ({
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+  const [isUploading, setIsUploading] = useState(false);
 
   const handleFileClick = () => {
     if (fileInputRef.current) {
@@ -25,19 +26,27 @@ const FileUploader: React.FC<FileUploaderProps> = ({
     }
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      onFileUpload(e.target.files);
-      // Reset o input para que o mesmo arquivo possa ser carregado novamente
-      e.target.value = '';
+      setIsUploading(true);
+      try {
+        await onFileUpload(e.target.files);
+      } finally {
+        setIsUploading(false);
+        e.target.value = '';
+      }
     }
   };
 
-  const handleFolderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFolderChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      onFolderUpload(e.target.files);
-      // Reset o input para que a mesma pasta possa ser carregada novamente
-      e.target.value = '';
+      setIsUploading(true);
+      try {
+        await onFolderUpload(e.target.files);
+      } finally {
+        setIsUploading(false);
+        e.target.value = '';
+      }
     }
   };
 
@@ -49,6 +58,7 @@ const FileUploader: React.FC<FileUploaderProps> = ({
         onChange={handleFileChange}
         multiple
         className="hidden"
+        disabled={isUploading}
       />
       <input
         type="file"
@@ -60,22 +70,33 @@ const FileUploader: React.FC<FileUploaderProps> = ({
         directory=""
         multiple
         className="hidden"
+        disabled={isUploading}
       />
       
       <button
         onClick={handleFileClick}
-        className="flex items-center px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-md text-white transition-colors"
+        disabled={isUploading}
+        className="flex items-center px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-md text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
       >
-        <Upload size={18} className="mr-2" />
-        Enviar Arquivo
+        {isUploading ? (
+          <Loader2 size={18} className="mr-2 animate-spin" />
+        ) : (
+          <Upload size={18} className="mr-2" />
+        )}
+        {isUploading ? 'Enviando...' : 'Enviar Arquivo'}
       </button>
       
       <button
         onClick={handleFolderClick}
-        className="flex items-center px-4 py-2 bg-yellow-600 hover:bg-yellow-700 rounded-md text-white transition-colors"
+        disabled={isUploading}
+        className="flex items-center px-4 py-2 bg-yellow-600 hover:bg-yellow-700 rounded-md text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
       >
-        <FolderUp size={18} className="mr-2" />
-        Enviar Pasta
+        {isUploading ? (
+          <Loader2 size={18} className="mr-2 animate-spin" />
+        ) : (
+          <FolderUp size={18} className="mr-2" />
+        )}
+        {isUploading ? 'Enviando...' : 'Enviar Pasta'}
       </button>
     </div>
   );

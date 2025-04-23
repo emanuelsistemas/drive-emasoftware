@@ -20,12 +20,14 @@ export const processFiles = async (fileList: FileList | null, currentPath: strin
       for (const folder of pathParts) {
         currentPathBuilt += folder + '/';
         
-        const { data: existingFolder } = await supabase
+        const { data: existingFolders } = await supabase
           .from('folders')
           .select('id')
           .eq('name', folder)
           .eq('path', currentPathBuilt)
-          .single();
+          .limit(1);
+
+        const existingFolder = existingFolders && existingFolders.length > 0 ? existingFolders[0] : null;
 
         if (!existingFolder) {
           const folderId = uuidv4();
@@ -36,7 +38,7 @@ export const processFiles = async (fileList: FileList | null, currentPath: strin
               name: folder,
               path: currentPathBuilt,
               parent_id: currentParent,
-              is_private: false
+              user_id: (await supabase.auth.getUser()).data.user?.id
             })
             .select()
             .single();
@@ -74,12 +76,21 @@ const uploadFile = async (
   items: FileItem[]
 ): Promise<void> => {
   const fileId = uuidv4();
-  const filePath = `${path}${fileName}`;
+  const userId = (await supabase.auth.getUser()).data.user?.id;
+  
+  if (!userId) {
+    throw new Error('User not authenticated');
+  }
+
+  const storagePath = `${userId}/${path}${fileName}`;
   
   // Upload do arquivo para o Storage
   const { data: uploadData, error: uploadError } = await supabase.storage
     .from('files')
-    .upload(filePath, file);
+    .upload(storagePath, file, {
+      cacheControl: '3600',
+      upsert: true
+    });
 
   if (uploadError) {
     console.error('Erro ao fazer upload:', uploadError);
@@ -92,12 +103,12 @@ const uploadFile = async (
     .insert({
       id: fileId,
       name: fileName,
-      path: filePath,
+      path: path + fileName,
       size: file.size,
       type: file.type,
       url: uploadData?.path || '',
       folder_id: parentId,
-      is_private: false
+      user_id: userId
     })
     .select()
     .single();
@@ -113,7 +124,7 @@ const uploadFile = async (
       name: fileName,
       type: 'file',
       size: file.size,
-      path: filePath,
+      path: path + fileName,
       parent: parentId,
     });
   }
