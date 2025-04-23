@@ -106,65 +106,258 @@ const FileGrid: React.FC<FileGridProps> = ({ files, onItemClick, onFileUpdate })
 
   const deleteFolderRecursively = async (folderId: string) => {
     try {
-      const allItems = getAllFilesInFolder(folderId);
+      console.log(`Starting recursive deletion of folder ID: ${folderId}`);
       
-      // Group items by type and depth
-      const fileItems = allItems.filter(item => item.type === 'file');
-      const folderItems = allItems
-        .filter(item => item.type === 'folder')
-        .sort((a, b) => {
-          // Sort by path depth (descending) to delete deepest folders first
+      // Primeiro, vamos buscar diretamente do banco de dados todos os arquivos e pastas relacionados
+      // para garantir que temos a lista completa, independentemente do estado local
+      
+      // 1. Buscar todas as subpastas recursivamente
+      let allSubfolders: any[] = [];
+      let subfoldersError: Error | null = null;
+      
+      try {
+        // Tentar usar a função RPC se existir
+        const result = await supabase.rpc(
+          'get_all_subfolders',
+          { parent_folder_id: folderId }
+        );
+        
+        if (result.error) {
+          throw result.error;
+        }
+        
+        allSubfolders = result.data || [];
+      } catch (error) {
+        console.log("RPC function not found or failed, using alternative query method");
+        
+        try {
+          // Função RPC não existe, vamos usar uma abordagem alternativa
+          // Primeiro, buscar a pasta atual para obter seu caminho
+          const { data: currentFolder } = await supabase
+            .from('folders')
+            .select('path')
+            .eq('id', folderId)
+            .single();
+            
+          if (!currentFolder) {
+            subfoldersError = new Error('Folder not found');
+          } else {
+            // Buscar todas as pastas cujo caminho começa com o caminho da pasta atual
+            const { data, error } = await supabase
+              .from('folders')
+              .select('*')
+              .like('path', `${currentFolder.path}%`)
+              .neq('id', folderId); // Excluir a pasta atual
+              
+            if (error) {
+              subfoldersError = error;
+            } else {
+              allSubfolders = data || [];
+            }
+          }
+        } catch (e) {
+          subfoldersError = e instanceof Error ? e : new Error('Unknown error fetching subfolders');
+        }
+      }
+      
+      if (subfoldersError) {
+        console.error("Error fetching subfolders:", subfoldersError);
+        throw subfoldersError;
+      }
+      
+      // 2. Buscar todos os arquivos nas pastas (incluindo a pasta atual e subpastas)
+      let allFolderIds = [folderId];
+      if (allSubfolders && allSubfolders.length > 0) {
+        allFolderIds = [...allFolderIds, ...allSubfolders.map((folder: any) => folder.id)];
+      }
+      
+      console.log(`Found ${allFolderIds.length} folders to process (including target folder)`);
+      
+      const { data: allFiles, error: filesError } = await supabase
+        .from('files')
+        .select('*')
+        .in('folder_id', allFolderIds);
+        
+      if (filesError) {
+        console.error("Error fetching files:", filesError);
+        throw filesError;
+      }
+      
+      console.log(`Found ${allFiles?.length || 0} files to delete`);
+      
+      // 3. Listar todos os arquivos no storage para correspondência
+      const allStorageFiles = await listAllStorageFiles('');
+      const storageFileMap = new Map();
+      
+      // Criar um mapa para busca rápida
+      for (const file of allStorageFiles) {
+        storageFileMap.set(file.name.toLowerCase(), file.name);
+        if (file.path) {
+          storageFileMap.set(file.path.toLowerCase(), file.path);
+        }
+      }
+      
+      console.log(`Found ${allStorageFiles.length} files in storage`);
+      
+      // 4. Excluir todos os arquivos do storage
+      if (allFiles && allFiles.length > 0) {
+        console.log(`Deleting ${allFiles.length} files from storage and database`);
+        
+        // Excluir cada arquivo individualmente do storage
+        for (const file of allFiles) {
+          let fileDeleted = false;
+          let matchedPath = null;
+          
+          // Tentar encontrar o arquivo no storage
+          const normalizedName = file.name.toLowerCase();
+          const normalizedPath = file.path.toLowerCase().replace(/^\/+/, '');
+          
+          // Verificar diferentes possibilidades de correspondência
+          if (storageFileMap.has(normalizedName)) {
+            matchedPath = storageFileMap.get(normalizedName);
+          } else if (storageFileMap.has(normalizedPath)) {
+            matchedPath = storageFileMap.get(normalizedPath);
+          }
+          
+          if (matchedPath) {
+            try {
+              const { error: storageError } = await supabase.storage
+                .from('files')
+                .remove([matchedPath]);
+                
+              if (storageError) {
+                console.error(`Failed to delete file from storage: ${matchedPath}`, storageError);
+              } else {
+                fileDeleted = true;
+                console.log(`Successfully deleted file from storage: ${matchedPath}`);
+              }
+            } catch (err) {
+              console.error(`Error deleting file from storage: ${matchedPath}`, err);
+            }
+          } else {
+            // Tentar métodos alternativos
+            const possiblePaths = [
+              file.path,
+              file.path?.replace(/^\/+/, ''),
+              file.name
+            ].filter(Boolean); // Remover valores nulos/undefined
+            
+            for (const path of possiblePaths) {
+              try {
+                const { error: storageError } = await supabase.storage
+                  .from('files')
+                  .remove([path]);
+                  
+                if (!storageError) {
+                  fileDeleted = true;
+                  console.log(`Successfully deleted file from storage using path: ${path}`);
+                  break;
+                }
+              } catch (err) {
+                // Continue tentando outros caminhos
+              }
+            }
+          }
+          
+          if (!fileDeleted) {
+            console.warn(`Could not delete file from storage: ${file.name} (ID: ${file.id})`);
+          }
+        }
+        
+        // 5. Excluir todos os arquivos do banco de dados
+        const { error: dbFilesError } = await supabase
+          .from('files')
+          .delete()
+          .in('id', allFiles.map(file => file.id));
+          
+        if (dbFilesError) {
+          console.error("Error deleting files from database:", dbFilesError);
+          throw dbFilesError;
+        }
+        
+        console.log(`Successfully deleted ${allFiles.length} files from database`);
+      }
+      
+      // 6. Excluir todas as subpastas do banco de dados (da mais profunda para a menos profunda)
+      if (allSubfolders && allSubfolders.length > 0) {
+        // Ordenar pastas por profundidade (da mais profunda para a menos profunda)
+        const sortedFolders = [...allSubfolders].sort((a, b) => {
           const depthA = (a.path.match(/\//g) || []).length;
           const depthB = (b.path.match(/\//g) || []).length;
           return depthB - depthA;
         });
-
-      // Delete all files first from storage
-      if (fileItems.length > 0) {
-        const { error: storageError } = await supabase.storage
-          .from('files')
-          .remove(fileItems.map(file => file.path));
-
-        if (storageError) {
-          throw new Error(`Error deleting files from storage: ${storageError.message}`);
+        
+        console.log(`Deleting ${sortedFolders.length} subfolders`);
+        
+        for (const folder of sortedFolders) {
+          const { error: folderError } = await supabase
+            .from('folders')
+            .delete()
+            .eq('id', folder.id);
+            
+          if (folderError) {
+            console.error(`Error deleting subfolder ${folder.id}:`, folderError);
+            throw folderError;
+          }
         }
-
-        // Delete files from database after successful storage deletion
-        const { error: dbError } = await supabase
-          .from('files')
-          .delete()
-          .in('id', fileItems.map(file => file.id));
-
-        if (dbError) {
-          throw new Error(`Error deleting files from database: ${dbError.message}`);
-        }
+        
+        console.log(`Successfully deleted ${sortedFolders.length} subfolders`);
       }
-
-      // Delete folders from deepest to shallowest
-      for (const folder of folderItems) {
-        const { error: folderError } = await supabase
-          .from('folders')
-          .delete()
-          .eq('id', folder.id);
-
-        if (folderError) {
-          throw new Error(`Error deleting folder: ${folderError.message}`);
-        }
-      }
-
-      // Finally delete the target folder
+      
+      // 7. Finalmente, excluir a pasta principal
+      console.log(`Deleting target folder: ${folderId}`);
       const { error: targetFolderError } = await supabase
         .from('folders')
         .delete()
         .eq('id', folderId);
-
+        
       if (targetFolderError) {
-        throw new Error(`Error deleting target folder: ${targetFolderError.message}`);
+        console.error("Error deleting target folder:", targetFolderError);
+        throw targetFolderError;
       }
-
+      
+      console.log(`Successfully deleted target folder: ${folderId}`);
+      
     } catch (error) {
       console.error('Error in recursive deletion:', error);
       throw error;
+    }
+  };
+
+  // Helper function to recursively list all files in storage
+  const listAllStorageFiles = async (path: string, allFiles: any[] = []): Promise<any[]> => {
+    try {
+      const { data: files, error } = await supabase.storage
+        .from('files')
+        .list(path, { sortBy: { column: 'name', order: 'asc' } });
+
+      if (error) {
+        throw error;
+      }
+
+      if (files && files.length > 0) {
+        // Add the current path to each file object
+        const processedFiles = files.map(file => ({
+          ...file,
+          path: path ? `${path}/${file.name}` : file.name
+        }));
+        
+        // Add all non-folder files to our result
+        const currentFiles = processedFiles.filter(file => !file.metadata?.mimetype?.includes('directory'));
+        allFiles.push(...currentFiles);
+        
+        // Recursively process folders
+        const folders = processedFiles.filter(file => file.metadata?.mimetype?.includes('directory'));
+        for (const folder of folders) {
+          const folderPath = path ? `${path}/${folder.name}` : folder.name;
+          await listAllStorageFiles(folderPath, allFiles);
+        }
+      }
+
+      return allFiles;
+    } catch (error) {
+      console.error(`Error listing storage at path "${path}":`, error);
+      return allFiles; // Return what we have so far
     }
   };
 
@@ -174,16 +367,98 @@ const FileGrid: React.FC<FileGridProps> = ({ files, onItemClick, onFileUpdate })
     setIsDeleting(true);
     try {
       if (itemToDelete.type === 'file') {
-        // Delete from storage first
-        const { error: storageError } = await supabase.storage
-          .from('files')
-          .remove([itemToDelete.path]);
-
-        if (storageError) {
-          throw new Error(`Error deleting file from storage: ${storageError.message}`);
+        // First list all files in the bucket to find the exact match
+        let storageDeleted = false;
+        let matchedPath = null;
+        
+        try {
+          // Get all files from the storage
+          const allStorageFiles = await listAllStorageFiles('');
+          console.log('Total files in storage:', allStorageFiles.length);
+          
+          // Look for a match by name or path
+          const normalizedName = itemToDelete.name.toLowerCase();
+          const normalizedPath = itemToDelete.path.toLowerCase().replace(/^\/+/, '');
+          
+          // Try to find a match by filename or path
+          const foundByName = allStorageFiles.find(
+            file => file.name.toLowerCase() === normalizedName
+          );
+          
+          const foundByPath = allStorageFiles.find(
+            file => file.path && file.path.toLowerCase() === normalizedPath
+          );
+          
+          if (foundByPath) {
+            matchedPath = foundByPath.path;
+            console.log(`Found exact path match: "${matchedPath}"`);
+          } else if (foundByName) {
+            matchedPath = foundByName.path;
+            console.log(`Found match by name: "${matchedPath}"`);
+          } else {
+            console.log('No exact match found in storage, will try alternative paths');
+            
+            // If we didn't find an exact match, dump a list of storage files for debugging
+            console.log('Available files in storage:',
+              allStorageFiles.map(f => ({ name: f.name, path: f.path }))
+            );
+          }
+          
+          if (matchedPath) {
+            // Try to delete the matched file
+            const { error: storageError } = await supabase.storage
+              .from('files')
+              .remove([matchedPath]);
+              
+            if (storageError) {
+              console.error(`Failed to delete matched path "${matchedPath}":`, storageError);
+            } else {
+              console.log(`Successfully deleted "${matchedPath}" from storage`);
+              storageDeleted = true;
+            }
+          }
+        } catch (err) {
+          console.error('Error listing or processing storage files:', err);
+        }
+        
+        // If we couldn't find or delete the matched file, try the original fallback methods
+        if (!storageDeleted) {
+          console.log('Falling back to alternative deletion methods');
+          
+          const possiblePaths = [
+            itemToDelete.path,                          // Original path
+            itemToDelete.path.replace(/^\/+/, ''),      // Without leading slash
+            itemToDelete.name                           // Just the filename
+          ];
+          
+          for (const path of possiblePaths) {
+            console.log(`Trying to delete using path: "${path}"`);
+            
+            if (!path) continue; // Skip empty paths
+            
+            try {
+              const { error: storageError } = await supabase.storage
+                .from('files')
+                .remove([path]);
+                
+              if (storageError) {
+                console.error(`Failed to delete using path "${path}":`, storageError);
+              } else {
+                console.log(`Successfully deleted using path "${path}"`);
+                storageDeleted = true;
+                break;
+              }
+            } catch (err) {
+              console.error(`Error trying path "${path}":`, err);
+            }
+          }
+        }
+        
+        if (!storageDeleted) {
+          console.warn('Could not delete the file from storage, but proceeding with database deletion');
         }
 
-        // Delete from database after successful storage deletion
+        // Delete from database regardless of storage deletion success
         const { error: dbError } = await supabase
           .from('files')
           .delete()
