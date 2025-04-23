@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { FileItem } from '../types';
 import { formatFileSize } from '../utils/fileUtils';
-import { File, Folder, MoreVertical, Download, Trash2, Edit2, X, Check, AlertTriangle } from 'lucide-react';
+// Adicionar Move icon
+import { File, Folder, MoreVertical, Download, Trash2, Edit2, X, Check, AlertTriangle, Move } from 'lucide-react'; 
 import { Menu, Dialog, Transition } from '@headlessui/react';
 import { supabase } from '../lib/supabase';
 import JSZip from 'jszip';
@@ -10,9 +11,10 @@ interface FileGridProps {
   files: FileItem[];
   onItemClick: (item: FileItem) => void;
   onFileUpdate: () => void;
+  onOpenMoveModal: (item: FileItem) => void; // Nova prop para abrir modal de mover
 }
 
-const FileGrid: React.FC<FileGridProps> = ({ files, onItemClick, onFileUpdate }) => {
+const FileGrid: React.FC<FileGridProps> = ({ files, onItemClick, onFileUpdate, onOpenMoveModal }) => {
   const [editingItem, setEditingItem] = useState<string | null>(null);
   const [newName, setNewName] = useState('');
   const [isDownloading, setIsDownloading] = useState(false);
@@ -589,10 +591,27 @@ const FileGrid: React.FC<FileGridProps> = ({ files, onItemClick, onFileUpdate })
                     </button>
                   )}
                 </Menu.Item>
+                {/* Novo item de menu "Mover" */}
+                <Menu.Item>
+                  {({ active }) => (
+                    <button
+                      className={`${
+                        active ? 'bg-gray-700' : ''
+                      } flex items-center w-full px-4 py-2 text-sm text-gray-300`}
+                      onClick={(e) => {
+                        e.stopPropagation(); // Impedir que o clique feche o menu ou navegue
+                        onOpenMoveModal(item);
+                      }}
+                    >
+                      <Move size={16} className="mr-2" />
+                      Mover
+                    </button>
+                  )}
+                </Menu.Item>
               </Menu.Items>
             </Menu>
 
-            <div 
+            <div
               className="flex flex-col items-center justify-between w-full h-full"
               onClick={() => onItemClick(item)}
             >

@@ -119,9 +119,18 @@ const uploadFile = async (
     throw new Error('User not authenticated');
   }
 
-  // Ensure path ends with a slash if it's not root
-  const normalizedPath = path === '/' ? path : (path.endsWith('/') ? path : path + '/');
-  const storagePath = `${userId}/${normalizedPath}${fileName}`;
+  // Normalizar o caminho base da pasta para o storage
+  let basePathForStorage = '';
+  if (path && path !== '/') {
+      // 1. Remover barra inicial (se houver)
+      basePathForStorage = path.startsWith('/') ? path.substring(1) : path;
+      // 2. Garantir que termine com barra (se não estiver vazio)
+      if (basePathForStorage && !basePathForStorage.endsWith('/')) {
+          basePathForStorage += '/';
+      }
+  }
+  // Construir o caminho final do storage
+  const storagePath = `${userId}/${basePathForStorage}${fileName}`;
   
   // Upload do arquivo para o Storage
   const { data: uploadData, error: uploadError } = await supabase.storage

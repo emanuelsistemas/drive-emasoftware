@@ -5,15 +5,18 @@ import Breadcrumb from './components/Breadcrumb';
 import FileGrid from './components/FileGrid';
 import ActionBar from './components/ActionBar';
 import Auth from './components/Auth';
-import CreateFolderModal from './components/CreateFolderModal'; // Importar o modal
+import CreateFolderModal from './components/CreateFolderModal';
+import MoveItemModal from './components/MoveItemModal'; // Importar modal de mover
 import { supabase } from './lib/supabase';
 import { User } from '@supabase/supabase-js';
-import { v4 as uuidv4 } from 'uuid'; // Importar uuid
+import { v4 as uuidv4 } from 'uuid';
 
 function App() {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [currentPath, setCurrentPath] = useState('/');
-  const [isCreateFolderModalOpen, setIsCreateFolderModalOpen] = useState(false); // Estado do modal
+  const [isCreateFolderModalOpen, setIsCreateFolderModalOpen] = useState(false);
+  const [isMoveItemModalOpen, setIsMoveItemModalOpen] = useState(false); // Estado do modal de mover
+  const [itemToMove, setItemToMove] = useState<FileItem | null>(null); // Item a ser movido
   const [searchQuery, setSearchQuery] = useState('');
   const [filteredFiles, setFilteredFiles] = useState<FileItem[]>([]);
   const [breadcrumbs, setBreadcrumbs] = useState(generateBreadcrumbs('/'));
@@ -220,6 +223,119 @@ function App() {
     await loadFiles();
   };
 
+  // Funções para o modal de mover
+  const handleOpenMoveModal = (item: FileItem) => {
+    setItemToMove(item);
+    setIsMoveItemModalOpen(true);
+  };
+
+  const handleCloseMoveModal = () => {
+    setIsMoveItemModalOpen(false);
+    setItemToMove(null);
+  };
+
+  const handleMoveItem = async (destinationFolderId: string | null) => {
+    if (!itemToMove || !user) throw new Error('Item ou usuário inválido');
+
+    console.log(`Tentando mover ${itemToMove.type} "${itemToMove.name}" para pasta ID: ${destinationFolderId ?? 'raiz'}`);
+
+    // Obter informações da pasta de destino
+    let destinationPath = '/';
+    if (destinationFolderId) {
+      const { data: destFolderData, error: destError } = await supabase
+        .from('folders')
+        .select('path')
+        .eq('id', destinationFolderId)
+        .single();
+      if (destError || !destFolderData) {
+        throw new Error('Pasta de destino não encontrada.');
+      }
+      destinationPath = destFolderData.path;
+    }
+
+    try {
+      if (itemToMove.type === 'file') {
+        // Mover arquivo
+
+        // Garantir que destinationPath termine com / se não for a raiz
+        const normalizedDestinationPath = destinationPath === '/' ? '' : (destinationPath.endsWith('/') ? destinationPath : destinationPath + '/');
+        
+        // Caminho antigo no storage (como está no DB, que deve incluir user_id)
+        const oldDbPath = itemToMove.path; 
+        // Novo caminho no storage (construído com base no destino)
+        const newStoragePath = `${user.id}/${normalizedDestinationPath}${itemToMove.name}`; 
+        // Novo caminho para salvar no DB (igual ao novo storage path)
+        const newDbPath = newStoragePath; // Caminho a ser salvo no DB (igual ao novo storage path)
+
+        // Usar os caminhos completos (com user_id) para a API de storage,
+        // pois o RLS parece depender disso e o path no DB já os inclui.
+        const oldStoragePathFull = oldDbPath;
+        const newStoragePathFull = newDbPath;
+
+        console.log(`Tentando mover no storage de: "${oldStoragePathFull}" para: "${newStoragePathFull}"`);
+        console.log(`Caminho antigo no DB: "${oldDbPath}"`);
+        console.log(`Novo caminho no DB: "${newDbPath}"`);
+
+        // 1. Mover no Storage usando caminhos completos
+        const { error: moveError } = await supabase.storage
+          .from('files')
+          .move(oldStoragePathFull, newStoragePathFull);
+          
+        if (moveError) {
+           // Log detalhado do erro
+           console.error(`Erro ao mover no storage: ${moveError.message}`, {
+             oldPath: oldStoragePathFull,
+             newPath: newStoragePathFull,
+             oldDbPath: oldDbPath,
+             newDbPath: newDbPath,
+             originalError: moveError
+           });
+           // Lançar o erro para o usuário
+           throw new Error(`Erro ao mover arquivo no storage: ${moveError.message}`);
+        }
+
+        // 2. Atualizar no Banco de Dados
+        const { error: updateError } = await supabase
+          .from('files')
+          .update({
+            folder_id: destinationFolderId,
+            path: newDbPath, // Atualizar o caminho no DB
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', itemToMove.id);
+
+        if (updateError) {
+          console.error("Erro ao atualizar arquivo no banco:", updateError);
+          // Idealmente, tentar reverter a movimentação no storage aqui
+          throw updateError;
+        }
+
+      } else {
+        // Mover pasta - Requer função RPC complexa
+        console.log("Movendo pasta:", itemToMove.id, "para:", destinationFolderId);
+        const { error: rpcError } = await supabase.rpc('move_folder_recursive', {
+            folder_to_move_id: itemToMove.id,
+            new_parent_folder_id: destinationFolderId,
+            user_id_param: user.id // Passar user_id se a função RPC precisar
+        });
+
+        if (rpcError) {
+            console.error("Erro ao chamar RPC move_folder_recursive:", rpcError);
+            throw rpcError;
+        }
+      }
+
+      console.log("Item movido com sucesso!");
+      await loadFiles(); // Recarregar arquivos
+
+    } catch (error) {
+       console.error("Falha ao mover item:", error);
+       // Re-throw para que o modal possa exibir o erro
+       throw error;
+    }
+  };
+
+
   if (!user) {
     return <Auth />;
   }
@@ -257,15 +373,23 @@ function App() {
           files={filteredFiles} 
           onItemClick={handleItemClick}
           onFileUpdate={loadFiles}
+          onOpenMoveModal={handleOpenMoveModal} // Passar a função para abrir modal
         />
       </main>
 
-      {/* Renderizar o modal */}
+      {/* Renderizar os modais */}
       <CreateFolderModal
         isOpen={isCreateFolderModalOpen}
         onClose={() => setIsCreateFolderModalOpen(false)}
         onCreate={handleCreateFolder}
         currentPath={currentPath}
+      />
+      <MoveItemModal
+        isOpen={isMoveItemModalOpen}
+        onClose={handleCloseMoveModal}
+        itemToMove={itemToMove}
+        onMoveConfirm={handleMoveItem}
+        userId={user?.id}
       />
     </div>
   );
