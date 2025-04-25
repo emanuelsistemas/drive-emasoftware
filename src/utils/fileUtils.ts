@@ -8,6 +8,24 @@ export const processFiles = async (fileList: FileList | null, currentPath: strin
   const items: FileItem[] = [];
   const processPromises: Promise<void>[] = [];
   const folderCache = new Map<string, string>();
+  
+  // Encontrar o ID da pasta atual baseado no currentPath
+  let currentFolderId: string | null = null;
+  
+  if (currentPath !== '/') {
+    const { data: currentFolderData, error } = await supabase
+      .from('folders')
+      .select('id')
+      .eq('path', currentPath)
+      .eq('user_id', (await supabase.auth.getUser()).data.user?.id)
+      .single();
+      
+    if (!error && currentFolderData) {
+      currentFolderId = currentFolderData.id;
+    } else {
+      console.error(`Erro ao encontrar pasta atual para path ${currentPath}:`, error);
+    }
+  }
 
   for (const file of Array.from(fileList)) {
     const relativePath = file.webkitRelativePath || file.name;
@@ -15,7 +33,8 @@ export const processFiles = async (fileList: FileList | null, currentPath: strin
     const fileName = pathParts.pop() || file.name;
 
     if (pathParts.length > 0) {
-      let currentParent = null;
+      // Upload de pasta com estrutura de diretórios
+      let currentParent = currentFolderId; // Começar a partir da pasta atual
       let currentPathBuilt = currentPath;
 
       // Process each folder in the path
@@ -23,29 +42,31 @@ export const processFiles = async (fileList: FileList | null, currentPath: strin
         currentPathBuilt += folder + '/';
         
         // Check if we've already processed this folder path
-        const cachedFolderId = folderCache.get(currentPathBuilt);
+        const cacheKey = currentPathBuilt + (currentParent || 'root');
+        const cachedFolderId = folderCache.get(cacheKey);
+        
         if (cachedFolderId) {
           currentParent = cachedFolderId;
           continue;
         }
 
-        // Check if folder exists in database
+        // Check if folder exists in database with same name and parent
         const { data: existingFolders } = await supabase
           .from('folders')
           .select('id, parent_id')
           .eq('name', folder)
-          .eq('path', currentPathBuilt)
+          .eq('parent_id', currentParent)
+          .eq('user_id', (await supabase.auth.getUser()).data.user?.id)
           .limit(1);
 
         const existingFolder = existingFolders && existingFolders.length > 0 ? existingFolders[0] : null;
 
         if (existingFolder) {
           currentParent = existingFolder.id;
-          folderCache.set(currentPathBuilt, existingFolder.id);
+          folderCache.set(cacheKey, existingFolder.id);
         } else {
           // Create new folder
           const folderId = uuidv4();
-          // Definir tipo explícito para newFolder
           const { data: newFolder }: { data: any | null } = await supabase 
             .from('folders')
             .insert({
@@ -67,37 +88,16 @@ export const processFiles = async (fileList: FileList | null, currentPath: strin
               parent: currentParent,
             });
             currentParent = newFolder.id;
-            folderCache.set(currentPathBuilt, newFolder.id);
+            folderCache.set(cacheKey, newFolder.id);
           }
         }
       }
 
       // Process the file within its folder
-      // Process the file within its folder
       processPromises.push(uploadFile(file, fileName, currentPathBuilt, currentParent, items));
     } else {
-      // Process single file upload (not part of a folder structure)
-      // We need to find the parent folder ID based on the currentPath
-      let parentFolderId: string | null = null;
-      if (currentPath !== '/') {
-        // Find the folder ID from the database based on the current path
-        const { data: parentFolderData, error: parentError } = await supabase
-          .from('folders')
-          .select('id')
-          .eq('path', currentPath)
-          .eq('user_id', (await supabase.auth.getUser()).data.user?.id)
-          .single();
-
-        if (parentError || !parentFolderData) {
-          console.error(`Error finding parent folder for path ${currentPath}:`, parentError);
-          // Handle error appropriately, maybe skip the file or throw an error
-          // For now, we'll proceed with null parentId, which means root
-        } else {
-          parentFolderId = parentFolderData.id;
-        }
-      }
-      // Pass the correct parentFolderId (or null for root)
-      processPromises.push(uploadFile(file, fileName, currentPath, parentFolderId, items));
+      // Upload de arquivo único (não é parte de uma estrutura de pasta)
+      processPromises.push(uploadFile(file, fileName, currentPath, currentFolderId, items));
     }
   }
 
