@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { FileItem } from './types';
 import { processFiles, generateBreadcrumbs } from './utils/fileUtils';
 import Breadcrumb from './components/Breadcrumb';
@@ -6,6 +6,7 @@ import FileGrid from './components/FileGrid';
 import ActionBar from './components/ActionBar';
 import Auth from './components/Auth';
 import CreateFolderModal from './components/CreateFolderModal';
+import CreateLinkModal from './components/CreateLinkModal';
 import MoveItemModal from './components/MoveItemModal'; // Importar modal de mover
 import { supabase } from './lib/supabase';
 import { User } from '@supabase/supabase-js';
@@ -15,6 +16,7 @@ function App() {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [currentPath, setCurrentPath] = useState('/');
   const [isCreateFolderModalOpen, setIsCreateFolderModalOpen] = useState(false);
+  const [isCreateLinkModalOpen, setIsCreateLinkModalOpen] = useState(false);
   const [isMoveItemModalOpen, setIsMoveItemModalOpen] = useState(false); // Estado do modal de mover
   const [itemToMove, setItemToMove] = useState<FileItem | null>(null); // Item a ser movido
   const [searchQuery, setSearchQuery] = useState('');
@@ -53,6 +55,14 @@ function App() {
         .eq('user_id', user.id);
 
       if (foldersError) throw foldersError;
+        
+      // Buscar os links
+      const { data: linksData, error: linksError } = await supabase
+        .from('links')
+        .select('*')
+        .eq('user_id', user.id);
+        
+      if (linksError) throw linksError;
 
       const items: FileItem[] = [
         ...(foldersData || []).map(folder => ({
@@ -69,6 +79,14 @@ function App() {
           size: file.size,
           path: file.path,
           parent: file.folder_id
+        })),
+        ...(linksData || []).map(link => ({
+          id: link.id,
+          name: link.name,
+          type: 'link' as const,
+          path: link.path,
+          parent: link.folder_id,
+          url: link.url
         }))
       ];
 
@@ -128,6 +146,9 @@ function App() {
     if (item.type === 'folder') {
       setCurrentPath(item.path);
       setSearchQuery(''); // Clear search when navigating
+    } else if (item.type === 'link') {
+      // Abrir o link em uma nova aba/janela
+      window.open(item.url, '_blank');
     } else {
       const { data } = await supabase.storage
         .from('files')
@@ -160,6 +181,70 @@ function App() {
 
   const handleOpenCreateFolderModal = () => {
     setIsCreateFolderModalOpen(true);
+  };
+  
+  const handleOpenCreateLinkModal = () => {
+    setIsCreateLinkModalOpen(true);
+  };
+
+  const handleCreateLink = async (linkUrl: string, linkName: string) => {
+    if (!user) return;
+
+    try {
+      // Determinar o ID da pasta pai (ou null se estiver na raiz)
+      let parentFolderId: string | null = null;
+      
+      if (currentPath !== '/') {
+        const { data: parentFolder, error } = await supabase
+          .from('folders')
+          .select('id')
+          .eq('path', currentPath)
+          .eq('user_id', user.id)
+          .single();
+          
+        if (error) {
+          console.error('Erro ao encontrar pasta pai:', error);
+          throw new Error('Não foi possível encontrar a pasta atual.');
+        }
+        
+        if (parentFolder) {
+          parentFolderId = parentFolder.id;
+        }
+      }
+      
+      // Criar um ID único para o link
+      const linkId = uuidv4();
+      
+      // Determinar o nome do arquivo (com extensão .link)
+      const fullLinkName = linkName.endsWith('.link') ? linkName : `${linkName}.link`;
+      
+      // Criar o registro do link no banco de dados
+      const { error: insertError } = await supabase
+        .from('links')
+        .insert({
+          id: linkId,
+          name: fullLinkName,
+          url: linkUrl,
+          path: currentPath,
+          folder_id: parentFolderId,
+          user_id: user.id,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        });
+        
+      if (insertError) {
+        console.error('Erro ao criar link:', insertError);
+        throw new Error('Não foi possível criar o link.');
+      }
+      
+      console.log('Link criado com sucesso!');
+      await loadFiles(); // Recarregar os arquivos
+      setIsCreateLinkModalOpen(false); // Fechar o modal
+      
+    } catch (error) {
+      console.error('Erro ao criar link:', error);
+      throw error;
+    }
   };
 
   const handleCreateFolder = async (folderName: string) => {
@@ -359,7 +444,8 @@ function App() {
           onSearch={handleSearch}
           onFileUpload={handleFileUpload}
           onFolderUpload={handleFolderUpload}
-          onCreateFolder={handleOpenCreateFolderModal} // Passar a função
+          onCreateFolder={handleOpenCreateFolderModal}
+          onCreateLink={handleOpenCreateLinkModal}
         />
         
         <div className="border-b border-gray-800 pb-2">
@@ -382,6 +468,12 @@ function App() {
         isOpen={isCreateFolderModalOpen}
         onClose={() => setIsCreateFolderModalOpen(false)}
         onCreate={handleCreateFolder}
+        currentPath={currentPath}
+      />
+      <CreateLinkModal
+        isOpen={isCreateLinkModalOpen}
+        onClose={() => setIsCreateLinkModalOpen(false)}
+        onCreate={handleCreateLink}
         currentPath={currentPath}
       />
       <MoveItemModal
