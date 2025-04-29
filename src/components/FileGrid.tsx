@@ -469,7 +469,23 @@ const FileGrid: React.FC<FileGridProps> = ({ files, onItemClick, onFileUpdate, o
         if (dbError) {
           throw new Error(`Error deleting file from database: ${dbError.message}`);
         }
+      } else if (itemToDelete.type === 'link') {
+        // Para links, só precisamos excluir do banco de dados
+        console.log(`Deleting link: ${itemToDelete.id} - ${itemToDelete.name}`);
+        
+        const { error: linkError } = await supabase
+          .from('links')
+          .delete()
+          .eq('id', itemToDelete.id);
+
+        if (linkError) {
+          console.error('Error deleting link:', linkError);
+          throw new Error(`Erro ao excluir link: ${linkError.message}`);
+        }
+        
+        console.log('Link deleted successfully');
       } else {
+        // É uma pasta
         await deleteFolderRecursively(itemToDelete.id);
       }
       
